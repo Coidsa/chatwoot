@@ -172,7 +172,7 @@ RSpec.describe User do
 
         expect(uri).to include('otpauth://totp/')
         expect(uri).to include(CGI.escape(user.email))
-        expect(uri).to include('Chatwoot')
+        expect(uri).to include('hupa')
       end
     end
 
