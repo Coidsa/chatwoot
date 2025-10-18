@@ -30,7 +30,7 @@ const state = {
   appVersion,
   azureAppId,
   brandName,
-  chatwootInboxToken,
+  hupaInboxToken,
   deploymentEnv,
   createNewAccountFromDashboard,
   directUploadsEnabled: parseBoolean(directUploadsEnabled),
@@ -50,9 +50,9 @@ const state = {
 
 export const getters = {
   get: $state => $state,
-  isOnChatwootCloud: $state => $state.deploymentEnv === 'cloud',
-  isACustomBrandedInstance: $state => $state.installationName !== 'Chatwoot',
-  isAChatwootInstance: $state => $state.installationName === 'Chatwoot',
+  isOnhupaCloud: $state => $state.deploymentEnv === 'cloud',
+  isACustomBrandedInstance: $state => $state.installationName !== 'hupa',
+  isAChatwootInstance: $state => $state.installationName === 'hupa',
 };
 
 export const actions = {};
