@@ -57,3 +57,8 @@ jobs:
             ${{ env.DOCKER_REPO }}:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+
+          - name: Replace Chatwoot domain
+  run: |
+    grep -rl "https://www.chatwoot.com" ./ | xargs sed -i 's|https://www.chatwoot.com|https://c.hupa.app|g'
