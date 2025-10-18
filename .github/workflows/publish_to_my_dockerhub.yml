@@ -2,8 +2,11 @@ name: Build & Push my Chatwoot CE
 
 on:
   push:
-    branches: [ stable-4.7, main ]   # عدّل الاسم لفرعك المستقر
-  workflow_dispatch:
+    branches:
+      - develop        # ضيف فرعك الفعلي هنا
+      - main
+      - stable-4.7
+  workflow_dispatch:    # يفضل تسيبه عشان التشغيل اليدوي عند اللزوم
 
 env:
   DOCKER_REPO: coidsa/chatwoot       # ← ريبو Docker Hub بتاعك
