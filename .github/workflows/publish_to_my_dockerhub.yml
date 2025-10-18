@@ -56,7 +56,5 @@ jobs:
           push: true
           tags: |
             ${{ env.DOCKER_REPO }}:latest
-            ${{ env.DOCKER_REPO }}:v4.7.0
-            ${{ env.DOCKER_REPO }}:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
