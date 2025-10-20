@@ -30,7 +30,7 @@ const state = {
   appVersion,
   azureAppId,
   brandName,
-  hupaInboxToken,
+  chatwootInboxToken,
   deploymentEnv,
   createNewAccountFromDashboard,
   directUploadsEnabled: parseBoolean(directUploadsEnabled),
