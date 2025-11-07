@@ -56,6 +56,12 @@ class DataImport::ContactManager
     contact.save
   end
 
+  def parse_labels(labels_string)
+    return [] if labels_string.blank?
+
+    labels_string.to_s.split(',').map(&:strip).reject(&:blank?)
+  end
+
   private
 
   def update_contact_attributes(params, contact)
@@ -63,6 +69,6 @@ class DataImport::ContactManager
     contact.additional_attributes ||= {}
     contact.additional_attributes[:company] = params[:company] if params[:company].present?
     contact.additional_attributes[:city] = params[:city] if params[:city].present?
-    contact.assign_attributes(custom_attributes: contact.custom_attributes.merge(params.except(:identifier, :email, :name, :phone_number)))
+    contact.assign_attributes(custom_attributes: contact.custom_attributes.merge(params.except(:identifier, :email, :name, :phone_number, :labels, :company, :city)))
   end
 end
