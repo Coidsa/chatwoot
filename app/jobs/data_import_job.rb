@@ -30,6 +30,7 @@ class DataImportJob < ApplicationJob
   def parse_csv_and_build_contacts
     contacts = []
     rejected_contacts = []
+    @labels_mapping = {}
     # Ensuring that importing non utf-8 characters will not throw error
     data = @data_import.import_file.download
     utf8_data = data.force_encoding('UTF-8')
@@ -40,9 +41,16 @@ class DataImportJob < ApplicationJob
     csv = CSV.parse(clean_data, headers: true)
 
     csv.each do |row|
-      current_contact = @contact_manager.build_contact(row.to_h.with_indifferent_access)
+      row_hash = row.to_h.with_indifferent_access
+      current_contact = @contact_manager.build_contact(row_hash)
       if current_contact.valid?
         contacts << current_contact
+        # Store labels for this contact using a unique identifier
+        labels = @contact_manager.parse_labels(row_hash[:labels])
+        if labels.present?
+          contact_key = build_contact_key(row_hash)
+          @labels_mapping[contact_key] = labels
+        end
       else
         append_rejected_contact(row, current_contact, rejected_contacts)
       end
@@ -59,6 +67,7 @@ class DataImportJob < ApplicationJob
   def import_contacts(contacts)
     # <struct ActiveRecord::Import::Result failed_instances=[], num_inserts=1, ids=[444, 445], results=[]>
     Contact.import(contacts, synchronize: contacts, on_duplicate_key_ignore: true, track_validation_failures: true, validate: true, batch_size: 1000)
+    assign_labels_to_contacts
   end
 
   def update_data_import_status(processed_records, rejected_records)
@@ -98,5 +107,49 @@ class DataImportJob < ApplicationJob
 
   def send_import_failed_notification_to_admin
     AdministratorNotifications::AccountNotificationMailer.with(account: @data_import.account).contact_import_failed.deliver_later
+  end
+
+  def build_contact_key(row_hash)
+    # Use identifier, email, or phone_number as unique key to match contacts after import
+    # Format phone number consistently for matching
+    if row_hash[:identifier].present?
+      { type: :identifier, value: row_hash[:identifier] }
+    elsif row_hash[:email].present?
+      { type: :email, value: row_hash[:email].downcase }
+    elsif row_hash[:phone_number].present?
+      { type: :phone_number, value: format_phone_number_for_search(row_hash[:phone_number]) }
+    end
+  end
+
+  def assign_labels_to_contacts
+    return if @labels_mapping.blank?
+
+    @labels_mapping.each do |contact_key, labels|
+      next unless contact_key
+
+      contact = find_contact_by_key(contact_key)
+      next unless contact
+
+      contact.add_labels(labels)
+    end
+  end
+
+  def find_contact_by_key(key_hash)
+    return nil unless key_hash
+
+    case key_hash[:type]
+    when :identifier
+      @data_import.account.contacts.find_by(identifier: key_hash[:value])
+    when :email
+      @data_import.account.contacts.from_email(key_hash[:value])
+    when :phone_number
+      @data_import.account.contacts.find_by(phone_number: key_hash[:value])
+    end
+  end
+
+  def format_phone_number_for_search(phone_number)
+    return nil if phone_number.blank?
+
+    phone_number.start_with?('+') ? phone_number : "+#{phone_number}"
   end
 end
