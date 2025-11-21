@@ -106,15 +106,46 @@ const statisticsText = computed(() => {
     delivered = 0,
     read = 0,
     failed = 0,
+    skipped_no_phone = 0,
+    skipped_invalid_phone = 0,
+    skipped_no_template = 0,
+    skipped_duplicate_campaign = 0,
+    skipped_race_condition = 0,
   } = props.statistics;
-  const skipped = total - sent - failed;
+  
+  // Calculate total skipped
+  const totalSkipped =
+    skipped_no_phone +
+    skipped_invalid_phone +
+    skipped_no_template +
+    skipped_duplicate_campaign +
+    skipped_race_condition;
   
   const parts = [];
+  
+  // Success metrics
   if (sent > 0) parts.push(`${sent} sent`);
   if (delivered > 0) parts.push(`${delivered} delivered`);
   if (read > 0) parts.push(`${read} read`);
-  if (skipped > 0) parts.push(`${skipped} skipped`);
+  
+  // Failure metrics
   if (failed > 0) parts.push(`${failed} failed`);
+  
+  // Skipped metrics (show total if > 0, or break down if details available)
+  if (totalSkipped > 0) {
+    const skippedDetails = [];
+    if (skipped_no_phone > 0) skippedDetails.push(`${skipped_no_phone} no phone`);
+    if (skipped_invalid_phone > 0) skippedDetails.push(`${skipped_invalid_phone} invalid phone`);
+    if (skipped_no_template > 0) skippedDetails.push(`${skipped_no_template} no template`);
+    if (skipped_duplicate_campaign > 0) skippedDetails.push(`${skipped_duplicate_campaign} duplicate`);
+    if (skipped_race_condition > 0) skippedDetails.push(`${skipped_race_condition} race condition`);
+    
+    if (skippedDetails.length > 0) {
+      parts.push(`skipped: ${skippedDetails.join(', ')}`);
+    } else {
+      parts.push(`${totalSkipped} skipped`);
+    }
+  }
   
   return parts.join(', ');
 });
@@ -156,10 +187,12 @@ const statisticsText = computed(() => {
       </div>
       <div
         v-if="hasStatistics && status === STATUS_COMPLETED"
-        class="flex items-center gap-2 text-xs text-n-slate-11"
+        class="flex flex-col gap-1 text-xs text-n-slate-11"
       >
-        <span class="font-medium">Statistics:</span>
-        <span>{{ statisticsText }}</span>
+        <div class="flex items-center gap-2">
+          <span class="font-medium">Statistics:</span>
+        </div>
+        <div class="text-n-slate-10 leading-relaxed">{{ statisticsText }}</div>
       </div>
     </div>
     <div class="flex items-center justify-end w-20 gap-2">
