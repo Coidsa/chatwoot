@@ -15,7 +15,7 @@ class Whatsapp::OneoffCampaignService
   delegate :channel, to: :inbox
 
   def validate_campaign_type!
-    raise "Invalid campaign #{campaign.id}" unless whatsapp_campaign? && campaign.one_off?
+    raise "Invalid campaign #{campaign.id}" unless whatsapp_campaign? && campaign.campaign_type_one_off?
   end
 
   def whatsapp_campaign?
@@ -82,20 +82,8 @@ class Whatsapp::OneoffCampaignService
         return
       end
 
-      # Check if contact already received ANY WhatsApp campaign message
-      # This prevents sending multiple campaigns to the same contact
-      existing_campaign_conversation = Conversation.where(
-        account: campaign.account,
-        inbox: inbox,
-        contact: contact,
-        contact_inbox: contact_inbox
-      ).where.not(campaign_id: nil).exists?
-
-      if existing_campaign_conversation
-        Rails.logger.info "Skipping contact #{contact.name} (#{contact.phone_number}) - already received a campaign message from this inbox"
-        increment_statistic(:skipped_previous_campaign)
-        return
-      end
+      # Remove the check that prevents sending ANY campaign - we only want to prevent duplicate from SAME campaign
+      # This allows sending different campaigns to the same contact
 
       # Create conversation BEFORE sending to prevent race conditions
       conversation = create_campaign_conversation(contact_inbox)
@@ -151,7 +139,6 @@ class Whatsapp::OneoffCampaignService
       skipped_no_phone: 0,
       skipped_no_template: 0,
       skipped_duplicate_campaign: 0,
-      skipped_previous_campaign: 0,
       skipped_race_condition: 0
     }
   end
