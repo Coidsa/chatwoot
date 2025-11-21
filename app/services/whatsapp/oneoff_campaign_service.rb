@@ -48,10 +48,18 @@ class Whatsapp::OneoffCampaignService
 
   def process_contact(contact)
     Rails.logger.info "Processing contact: #{contact.name} (#{contact.phone_number})"
+    increment_statistic(:total) unless @statistics[:total] > 0 # Don't double count if total was already set
 
     if contact.phone_number.blank?
       Rails.logger.info "Skipping contact #{contact.name} - no phone number"
       increment_statistic(:skipped_no_phone)
+      return
+    end
+
+    # Validate phone number format for WhatsApp (must start with +)
+    unless contact.phone_number.start_with?('+')
+      Rails.logger.info "Skipping contact #{contact.name} (#{contact.phone_number}) - invalid phone number format (must start with +)"
+      increment_statistic(:skipped_invalid_phone)
       return
     end
 
@@ -82,15 +90,13 @@ class Whatsapp::OneoffCampaignService
         return
       end
 
-      # Remove the check that prevents sending ANY campaign - we only want to prevent duplicate from SAME campaign
-      # This allows sending different campaigns to the same contact
-
       # Create conversation BEFORE sending to prevent race conditions
       conversation = create_campaign_conversation(contact_inbox)
       
       # Now send the message - if this fails, conversation is already marked as sent
       send_whatsapp_template_message(to: contact.phone_number, contact: contact, conversation: conversation)
       increment_statistic(:sent)
+      Rails.logger.info "Successfully processed contact #{contact.name} (#{contact.phone_number})"
     end
   rescue ActiveRecord::RecordNotUnique, ActiveRecord::StatementInvalid => e
     # Handle race condition where conversation was created by another process
@@ -98,8 +104,8 @@ class Whatsapp::OneoffCampaignService
     increment_statistic(:skipped_race_condition)
     nil
   rescue StandardError => e
-    Rails.logger.error "Error processing contact #{contact.name}: #{e.message}"
-    Rails.logger.error "Backtrace: #{e.backtrace.first(5).join('\n')}"
+    Rails.logger.error "Error processing contact #{contact.name} (#{contact.phone_number}): #{e.class} - #{e.message}"
+    Rails.logger.error "Backtrace: #{e.backtrace.first(10).join('\n')}"
     increment_statistic(:failed)
     # Continue processing remaining contacts instead of failing entire campaign
     nil
@@ -109,10 +115,20 @@ class Whatsapp::OneoffCampaignService
     contacts = campaign.account.contacts.tagged_with(audience_labels, any: true).distinct
     @statistics[:total] = contacts.count
     Rails.logger.info "Processing #{contacts.count} contacts for campaign #{campaign.id}"
+    Rails.logger.info "Campaign statistics initialized: #{@statistics.inspect}"
 
-    contacts.each { |contact| process_contact(contact) }
+    processed_count = 0
+    contacts.find_each do |contact|
+      process_contact(contact)
+      processed_count += 1
+      
+      # Log progress every 100 contacts
+      if processed_count % 100 == 0
+        Rails.logger.info "Campaign #{campaign.id} progress: #{processed_count}/#{contacts.count} contacts processed. Statistics: #{@statistics.inspect}"
+      end
+    end
 
-    Rails.logger.info "Campaign #{campaign.id} processing completed"
+    Rails.logger.info "Campaign #{campaign.id} processing completed. Final statistics: #{@statistics.inspect}"
   end
 
   def create_campaign_conversation(contact_inbox)
@@ -139,7 +155,8 @@ class Whatsapp::OneoffCampaignService
       skipped_no_phone: 0,
       skipped_no_template: 0,
       skipped_duplicate_campaign: 0,
-      skipped_race_condition: 0
+      skipped_race_condition: 0,
+      skipped_invalid_phone: 0
     }
   end
 
@@ -166,7 +183,12 @@ class Whatsapp::OneoffCampaignService
 
     name, namespace, lang_code, processed_parameters = processor.call
 
-    return if name.blank?
+    if name.blank?
+      Rails.logger.error "Failed to process template for #{to}: template name is blank"
+      raise "Template name is blank"
+    end
+
+    Rails.logger.info "Sending WhatsApp template to #{to}: template=#{name}, namespace=#{namespace}, lang=#{lang_code}"
 
     message_id = channel.send_template(to, {
                                          name: name,
@@ -174,6 +196,11 @@ class Whatsapp::OneoffCampaignService
                                          lang_code: lang_code,
                                          parameters: processed_parameters
                                        }, nil)
+
+    if message_id.blank?
+      Rails.logger.error "Failed to send WhatsApp template message to #{to}: message_id is blank (API returned nil)"
+      raise "Message ID is blank - API call may have failed"
+    end
 
     # Create message record if conversation is provided
     if conversation && message_id.present?
@@ -195,8 +222,8 @@ class Whatsapp::OneoffCampaignService
     Rails.logger.info "Successfully sent WhatsApp template message to #{to} (message_id: #{message_id})"
 
   rescue StandardError => e
-    Rails.logger.error "Failed to send WhatsApp template message to #{to}: #{e.message}"
-    Rails.logger.error "Backtrace: #{e.backtrace.first(5).join('\n')}"
+    Rails.logger.error "Failed to send WhatsApp template message to #{to}: #{e.class} - #{e.message}"
+    Rails.logger.error "Backtrace: #{e.backtrace.first(10).join('\n')}"
     # Re-raise to trigger transaction rollback and skip this contact
     raise
   end
