@@ -90,19 +90,25 @@ class Whatsapp::OneoffCampaignService
       return
     end
 
-    # Simplified approach: Use find_or_create_by to avoid complex transaction logic
-    # Generate source_id for WhatsApp (phone number without +)
-    source_id = contact.phone_number.delete('+')
-    
-    # Find or create contact_inbox using ContactInboxBuilder
+    # Use ContactInboxBuilder to ensure proper source_id is set for WhatsApp
+    # ContactInboxBuilder automatically generates source_id from phone_number (removes +)
+    # WhatsApp source_id must match regex: ^\d{1,15}\z (digits only, 1-15 characters, no +)
     contact_inbox = ContactInboxBuilder.new(
       contact: contact,
       inbox: inbox,
-      source_id: source_id
+      source_id: nil # Let builder generate it from phone_number
     ).perform
     
     unless contact_inbox
       Rails.logger.error "Failed to create contact_inbox for contact #{contact.name} (#{contact.phone_number})"
+      increment_statistic(:skipped_invalid_phone)
+      return
+    end
+    
+    # Validate source_id format after creation (should already be validated, but double-check)
+    unless contact_inbox.source_id.match?(/^\d{1,15}$/)
+      Rails.logger.error "Invalid source_id format for contact #{contact.name} (#{contact.phone_number}): #{contact_inbox.source_id}"
+      Rails.logger.error "Source_id must be 1-15 digits only (regex: ^\\d{1,15}\\z)"
       increment_statistic(:skipped_invalid_phone)
       return
     end
@@ -144,11 +150,20 @@ class Whatsapp::OneoffCampaignService
     nil
   rescue ActiveRecord::RecordInvalid => e
     # Handle validation errors (e.g., source_id validation)
-    Rails.logger.error "Validation error for contact #{contact.name} (#{contact.phone_number}): #{e.message}"
-    if e.message.include?('source') || e.message.include?('Source')
+    error_msg = e.message
+    Rails.logger.error "=" * 80
+    Rails.logger.error "Validation error for contact #{contact.name} (#{contact.phone_number})"
+    Rails.logger.error "Error: #{error_msg}"
+    Rails.logger.error "Phone number: #{contact.phone_number}"
+    Rails.logger.error "Attempted source_id: #{source_id rescue 'unknown'}"
+    Rails.logger.error "=" * 80
+    
+    if error_msg.include?('source') || error_msg.include?('Source') || error_msg.include?('source_id')
       increment_statistic(:skipped_invalid_phone)
+      Rails.logger.error "Categorized as: INVALID_PHONE_NUMBER"
     else
       increment_statistic(:failed)
+      Rails.logger.error "Categorized as: OTHER_VALIDATION_ERROR"
     end
     nil
   rescue StandardError => e
