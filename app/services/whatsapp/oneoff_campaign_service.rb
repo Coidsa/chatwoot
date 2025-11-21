@@ -15,7 +15,7 @@ class Whatsapp::OneoffCampaignService
   delegate :channel, to: :inbox
 
   def validate_campaign_type!
-    raise "Invalid campaign #{campaign.id}" unless whatsapp_campaign? && campaign.campaign_type_one_off?
+    raise "Invalid campaign #{campaign.id}" unless whatsapp_campaign? && campaign.one_off?
   end
 
   def whatsapp_campaign?
