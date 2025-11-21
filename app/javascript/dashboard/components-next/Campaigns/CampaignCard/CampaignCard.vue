@@ -90,9 +90,23 @@ const hasStatistics = computed(() => {
 
 const statisticsText = computed(() => {
   if (!hasStatistics.value) return '';
-  const { total = 0, sent = 0, failed = 0 } = props.statistics;
+  const {
+    total = 0,
+    sent = 0,
+    delivered = 0,
+    read = 0,
+    failed = 0,
+  } = props.statistics;
   const skipped = total - sent - failed;
-  return `${sent} sent${skipped > 0 ? `, ${skipped} skipped` : ''}${failed > 0 ? `, ${failed} failed` : ''}`;
+  
+  const parts = [];
+  if (sent > 0) parts.push(`${sent} sent`);
+  if (delivered > 0) parts.push(`${delivered} delivered`);
+  if (read > 0) parts.push(`${read} read`);
+  if (skipped > 0) parts.push(`${skipped} skipped`);
+  if (failed > 0) parts.push(`${failed} failed`);
+  
+  return parts.join(', ');
 });
 </script>
 
