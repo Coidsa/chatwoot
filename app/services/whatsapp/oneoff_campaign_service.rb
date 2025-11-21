@@ -113,7 +113,30 @@ class Whatsapp::OneoffCampaignService
       return
     end
 
-    # Simple check: if conversation already exists with this campaign, skip
+    # Check if message was already sent from THIS specific campaign (by campaign_id)
+    # This allows creating NEW campaigns for the same audience - they will send to all contacts
+    # But prevents re-sending from the SAME campaign (duplicate prevention)
+    existing_message = Message.joins(:conversation)
+                              .where(
+                                conversations: {
+                                  account_id: campaign.account.id,
+                                  inbox_id: inbox.id,
+                                  contact_id: contact.id,
+                                  campaign_id: campaign.id
+                                }
+                              )
+                              .where.not(source_id: nil)
+                              .where("messages.additional_attributes -> 'campaign_id' = ?", campaign.id.to_s)
+                              .exists?
+    
+    if existing_message
+      Rails.logger.info "Skipping contact #{contact.name} (#{contact.phone_number}) - already received message from campaign #{campaign.id}"
+      increment_statistic(:skipped_duplicate_campaign)
+      return
+    end
+    
+    # Check if conversation exists from this campaign (might exist without message if sending failed)
+    # If conversation exists but no message was sent, delete it and retry
     existing_conversation = Conversation.find_by(
       account: campaign.account,
       inbox: inbox,
@@ -122,9 +145,9 @@ class Whatsapp::OneoffCampaignService
     )
 
     if existing_conversation
-      Rails.logger.info "Skipping contact #{contact.name} (#{contact.phone_number}) - already received message from campaign #{campaign.id} (conversation_id: #{existing_conversation.id})"
-      increment_statistic(:skipped_duplicate_campaign)
-      return
+      # Conversation exists but no message was sent - delete it and retry
+      Rails.logger.warn "Found existing conversation #{existing_conversation.id} for campaign #{campaign.id} but no message sent - deleting and retrying"
+      existing_conversation.destroy
     end
 
     # Create conversation - use create! to get error if already exists (race condition protection)
@@ -244,33 +267,61 @@ class Whatsapp::OneoffCampaignService
     contacts = campaign.account.contacts.tagged_with(audience_labels, any: true).distinct
     @statistics[:total] = contacts.count
     
+    # Rate limiting configuration
+    # WhatsApp default: 80 messages/second, but we use 60/second to be safe
+    # This means ~1 message every 16.67ms, or ~0.017 seconds
+    # We'll use 50/second to have buffer = 20ms delay between messages = 0.02 seconds
+    messages_per_second = ENV.fetch('WHATSAPP_CAMPAIGN_RATE_LIMIT_PER_SECOND', '50').to_i
+    delay_between_messages = 1.0 / messages_per_second # seconds
+    
     Rails.logger.info "=" * 80
     Rails.logger.info "🚀 Starting Campaign Processing"
     Rails.logger.info "Campaign ID: #{campaign.id}"
     Rails.logger.info "Campaign Title: #{campaign.title}"
     Rails.logger.info "Total Contacts: #{contacts.count}"
+    Rails.logger.info "Rate Limit: #{messages_per_second} messages/second (#{(delay_between_messages * 1000).round(2)}ms delay between messages)"
     Rails.logger.info "Statistics initialized: #{@statistics.inspect}"
     Rails.logger.info "=" * 80
 
     processed_count = 0
     error_count = 0
+    last_message_time = nil
+    campaign_start_time = Time.current
     
     contacts.find_each do |contact|
       begin
+        # Throttle: ensure we don't exceed rate limit
+        if last_message_time
+          time_since_last_message = Time.current - last_message_time
+          if time_since_last_message < delay_between_messages
+            sleep_time = delay_between_messages - time_since_last_message
+            sleep(sleep_time) if sleep_time > 0
+          end
+        end
+        
         process_contact(contact)
       rescue => e
         error_count += 1
         # Errors are already logged in process_contact rescue block
+      ensure
+        # Always update last_message_time to maintain rate limit
+        # This ensures we respect rate limits even if processing fails
+        last_message_time = Time.current
       end
       
       processed_count += 1
       
       # Log progress every 100 contacts
       if processed_count % 100 == 0
+        elapsed_time = Time.current - campaign_start_time
+        current_rate = processed_count / elapsed_time if elapsed_time > 0
         Rails.logger.info "-" * 80
         Rails.logger.info "📊 Campaign #{campaign.id} Progress: #{processed_count}/#{contacts.count} contacts processed"
-        Rails.logger.info "Statistics: #{@statistics.inspect}"
+        Rails.logger.info "Statistics: #{@statistics.except(:error_details).inspect}"
         Rails.logger.info "Errors encountered so far: #{error_count}"
+        Rails.logger.info "Elapsed time: #{elapsed_time.round(2)} seconds"
+        Rails.logger.info "Current rate: #{(current_rate || 0).round(2)} messages/second"
+        Rails.logger.info "Target rate: #{messages_per_second} messages/second"
         Rails.logger.info "-" * 80
       end
     end
