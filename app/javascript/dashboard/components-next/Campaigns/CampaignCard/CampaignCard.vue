@@ -85,7 +85,17 @@ const inboxIcon = computed(() => {
 });
 
 const hasStatistics = computed(() => {
-  return props.statistics && Object.keys(props.statistics).length > 0 && props.statistics.total > 0;
+  if (!props.statistics || Object.keys(props.statistics).length === 0) {
+    return false;
+  }
+  // Show statistics if there's any meaningful data (sent, delivered, read, failed, or total)
+  return (
+    (props.statistics.total && props.statistics.total > 0) ||
+    (props.statistics.sent && props.statistics.sent > 0) ||
+    (props.statistics.delivered && props.statistics.delivered > 0) ||
+    (props.statistics.read && props.statistics.read > 0) ||
+    (props.statistics.failed && props.statistics.failed > 0)
+  );
 });
 
 const statisticsText = computed(() => {
