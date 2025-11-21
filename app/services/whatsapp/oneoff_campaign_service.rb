@@ -145,6 +145,8 @@ class Whatsapp::OneoffCampaignService
     @statistics = {
       total: 0,
       sent: 0,
+      delivered: 0,
+      read: 0,
       failed: 0,
       skipped_no_phone: 0,
       skipped_no_template: 0,
@@ -196,8 +198,10 @@ class Whatsapp::OneoffCampaignService
         message_type: :outgoing,
         status: :sent,
         source_id: message_id,
-        campaign_id: campaign.id,
-        additional_attributes: { template_params: campaign.template_params }
+        additional_attributes: {
+          campaign_id: campaign.id,
+          template_params: campaign.template_params
+        }
       )
     end
 
