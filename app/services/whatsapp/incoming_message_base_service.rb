@@ -106,33 +106,58 @@ class Whatsapp::IncomingMessageBaseService
     # Use pessimistic locking to prevent race conditions
     campaign.with_lock do
       stats = campaign.reload.trigger_rules&.dig('statistics') || {}
+      sent_count = stats['sent'] || 0
+      initial_delivered = stats['delivered'] || 0
+      initial_read = stats['read'] || 0
+      initial_failed = stats['failed'] || 0
       
       case new_status_s
       when 'delivered'
         # Only increment if transitioning from sent to delivered
-        if old_status_s == 'sent'
+        # Also ensure delivered never exceeds sent
+        if old_status_s == 'sent' && (stats['delivered'] || 0) < sent_count
           stats['delivered'] = (stats['delivered'] || 0) + 1
-          Rails.logger.info "Campaign #{campaign.id}: Incremented delivered count (now: #{stats['delivered']})"
+          Rails.logger.info "Campaign #{campaign.id}: Incremented delivered count (now: #{stats['delivered']}/#{sent_count})"
+        else
+          Rails.logger.debug "Campaign #{campaign.id}: Skipping delivered increment (old_status: #{old_status_s}, delivered: #{stats['delivered'] || 0}, sent: #{sent_count})"
         end
         
       when 'read'
         # Only increment if transitioning from delivered/sent to read
-        if old_status_s == 'delivered' || old_status_s == 'sent'
+        # Ensure read never exceeds delivered (or sent if delivered not tracked)
+        max_delivered = [(stats['delivered'] || 0), sent_count].max
+        if (old_status_s == 'delivered' || old_status_s == 'sent') && (stats['read'] || 0) < max_delivered
           stats['read'] = (stats['read'] || 0) + 1
-          # If transitioning from sent directly to read, also count as delivered
-          if old_status_s == 'sent'
+          # If transitioning from sent directly to read, also count as delivered (but only if it doesn't exceed sent)
+          if old_status_s == 'sent' && (stats['delivered'] || 0) < sent_count
             stats['delivered'] = (stats['delivered'] || 0) + 1
-            Rails.logger.info "Campaign #{campaign.id}: Incremented delivered count (now: #{stats['delivered']})"
+            Rails.logger.info "Campaign #{campaign.id}: Incremented delivered count (now: #{stats['delivered']}/#{sent_count})"
           end
-          Rails.logger.info "Campaign #{campaign.id}: Incremented read count (now: #{stats['read']})"
+          Rails.logger.info "Campaign #{campaign.id}: Incremented read count (now: #{stats['read']}/#{max_delivered})"
+        else
+          Rails.logger.debug "Campaign #{campaign.id}: Skipping read increment (old_status: #{old_status_s}, read: #{stats['read'] || 0}, max_delivered: #{max_delivered})"
         end
         
       when 'failed'
         # Only increment if transitioning from sent to failed
+        # Ensure failed doesn't cause delivered+failed to exceed sent
         if old_status_s == 'sent'
           stats['failed'] = (stats['failed'] || 0) + 1
-          Rails.logger.info "Campaign #{campaign.id}: Incremented failed count (now: #{stats['failed']})"
+          Rails.logger.info "Campaign #{campaign.id}: Incremented failed count (now: #{stats['failed']}/#{sent_count})"
         end
+      end
+
+      # Safety check: ensure delivered never exceeds sent
+      if stats['delivered'] && stats['delivered'] > sent_count
+        Rails.logger.warn "Campaign #{campaign.id}: Correcting delivered count (#{stats['delivered']}) to not exceed sent (#{sent_count})"
+        stats['delivered'] = sent_count
+      end
+      
+      # Safety check: ensure read never exceeds delivered (or sent)
+      max_allowed_read = [(stats['delivered'] || 0), sent_count].max
+      if stats['read'] && stats['read'] > max_allowed_read
+        Rails.logger.warn "Campaign #{campaign.id}: Correcting read count (#{stats['read']}) to not exceed max allowed (#{max_allowed_read})"
+        stats['read'] = max_allowed_read
       end
 
       # Update campaign statistics
@@ -140,7 +165,7 @@ class Whatsapp::IncomingMessageBaseService
       trigger_rules['statistics'] = stats
       campaign.update_column(:trigger_rules, trigger_rules)
       
-      Rails.logger.info "Campaign #{campaign.id} statistics updated: sent=#{stats['sent'] || 0}, delivered=#{stats['delivered'] || 0}, read=#{stats['read'] || 0}, failed=#{stats['failed'] || 0}"
+      Rails.logger.info "Campaign #{campaign.id} statistics updated: sent=#{sent_count}, delivered=#{stats['delivered'] || 0}, read=#{stats['read'] || 0}, failed=#{stats['failed'] || 0}"
     end
   rescue StandardError => e
     Rails.logger.error "Error updating campaign #{campaign_id} statistics for message #{message.id}: #{e.class} - #{e.message}"
