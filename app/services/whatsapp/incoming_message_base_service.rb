@@ -40,11 +40,27 @@ class Whatsapp::IncomingMessageBaseService
   end
 
   def process_statuses
-    return unless find_message_by_source_id(@processed_params[:statuses].first[:id])
+    status_data = @processed_params[:statuses].first
+    message_id = status_data[:id]
+    new_status = status_data[:status]
+    
+    Rails.logger.info "Processing WhatsApp status update: message_id=#{message_id}, status=#{new_status}, recipient=#{status_data[:recipient_id]}"
+    
+    message = find_message_by_source_id(message_id)
+    unless message
+      Rails.logger.warn "Message not found for source_id: #{message_id} - status update ignored"
+      return
+    end
 
-    update_message_with_status(@message, @processed_params[:statuses].first)
+    Rails.logger.info "Found message: id=#{message.id}, current_status=#{message.status}, campaign_id=#{message.additional_attributes&.dig('campaign_id')}"
+    
+    update_message_with_status(message, status_data)
   rescue ArgumentError => e
-    Rails.logger.error "Error while processing whatsapp status update #{e.message}"
+    Rails.logger.error "Error while processing whatsapp status update: #{e.message}"
+    Rails.logger.error "Backtrace: #{e.backtrace.first(5).join('\n')}"
+  rescue StandardError => e
+    Rails.logger.error "Unexpected error processing status update: #{e.class} - #{e.message}"
+    Rails.logger.error "Backtrace: #{e.backtrace.first(10).join('\n')}"
   end
 
   def update_message_with_status(message, status)
@@ -62,17 +78,28 @@ class Whatsapp::IncomingMessageBaseService
 
   def update_campaign_statistics_from_message_status(message, old_status, new_status)
     campaign_id = message.additional_attributes&.dig('campaign_id')
-    return unless campaign_id
+    
+    unless campaign_id
+      Rails.logger.debug "Message #{message.id} has no campaign_id in additional_attributes - skipping statistics update"
+      return
+    end
 
     campaign = Campaign.find_by(id: campaign_id)
-    return unless campaign
+    unless campaign
+      Rails.logger.warn "Campaign #{campaign_id} not found for message #{message.id} - skipping statistics update"
+      return
+    end
 
     # Skip if status didn't actually change
-    return if old_status.to_s == new_status.to_s
+    if old_status.to_s == new_status.to_s
+      Rails.logger.debug "Message #{message.id} status unchanged (#{old_status}) - skipping statistics update"
+      return
+    end
+
+    Rails.logger.info "Updating campaign #{campaign.id} statistics: message #{message.id} status changed from #{old_status} to #{new_status}"
 
     # Update statistics based on status transition
     # Status flow: sent -> delivered -> read (can't go backwards in normal flow)
-    stats = campaign.trigger_rules&.dig('statistics') || {}
     old_status_s = old_status.to_s
     new_status_s = new_status.to_s
     
@@ -83,26 +110,28 @@ class Whatsapp::IncomingMessageBaseService
       case new_status_s
       when 'delivered'
         # Only increment if transitioning from sent to delivered
-        # (delivered is a subset of sent, so we count unique delivered messages)
         if old_status_s == 'sent'
           stats['delivered'] = (stats['delivered'] || 0) + 1
+          Rails.logger.info "Campaign #{campaign.id}: Incremented delivered count (now: #{stats['delivered']})"
         end
         
       when 'read'
         # Only increment if transitioning from delivered/sent to read
-        # (read is a subset of delivered, so we count unique read messages)
         if old_status_s == 'delivered' || old_status_s == 'sent'
           stats['read'] = (stats['read'] || 0) + 1
           # If transitioning from sent directly to read, also count as delivered
-          stats['delivered'] = (stats['delivered'] || 0) + 1 if old_status_s == 'sent'
+          if old_status_s == 'sent'
+            stats['delivered'] = (stats['delivered'] || 0) + 1
+            Rails.logger.info "Campaign #{campaign.id}: Incremented delivered count (now: #{stats['delivered']})"
+          end
+          Rails.logger.info "Campaign #{campaign.id}: Incremented read count (now: #{stats['read']})"
         end
         
       when 'failed'
         # Only increment if transitioning from sent to failed
-        # (failed messages were attempted but didn't succeed)
         if old_status_s == 'sent'
           stats['failed'] = (stats['failed'] || 0) + 1
-          # Optionally decrement sent count, but we keep it to show attempted sends
+          Rails.logger.info "Campaign #{campaign.id}: Incremented failed count (now: #{stats['failed']})"
         end
       end
 
@@ -111,11 +140,11 @@ class Whatsapp::IncomingMessageBaseService
       trigger_rules['statistics'] = stats
       campaign.update_column(:trigger_rules, trigger_rules)
       
-      Rails.logger.info "Updated campaign #{campaign.id} statistics: #{old_status_s} -> #{new_status_s} (delivered: #{stats['delivered'] || 0}, read: #{stats['read'] || 0}, failed: #{stats['failed'] || 0})"
+      Rails.logger.info "Campaign #{campaign.id} statistics updated: sent=#{stats['sent'] || 0}, delivered=#{stats['delivered'] || 0}, read=#{stats['read'] || 0}, failed=#{stats['failed'] || 0}"
     end
   rescue StandardError => e
-    Rails.logger.error "Error updating campaign statistics: #{e.message}"
-    Rails.logger.error e.backtrace.first(5).join("\n")
+    Rails.logger.error "Error updating campaign #{campaign_id} statistics for message #{message.id}: #{e.class} - #{e.message}"
+    Rails.logger.error "Backtrace: #{e.backtrace.first(10).join('\n')}"
   end
 
   def create_messages
