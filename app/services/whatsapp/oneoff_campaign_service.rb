@@ -104,9 +104,38 @@ class Whatsapp::OneoffCampaignService
     increment_statistic(:skipped_race_condition)
     nil
   rescue StandardError => e
-    Rails.logger.error "Error processing contact #{contact.name} (#{contact.phone_number}): #{e.class} - #{e.message}"
-    Rails.logger.error "Backtrace: #{e.backtrace.first(10).join('\n')}"
-    increment_statistic(:failed)
+    error_class = e.class.name
+    error_message = e.message
+    
+    # Log detailed error information
+    Rails.logger.error "=" * 80
+    Rails.logger.error "ERROR processing contact #{contact.name} (#{contact.phone_number})"
+    Rails.logger.error "Error Class: #{error_class}"
+    Rails.logger.error "Error Message: #{error_message}"
+    
+    # Categorize errors for better statistics
+    if error_message.include?('phone number') || error_message.include?('invalid') || error_message.include?('format')
+      Rails.logger.error "Error Category: INVALID_PHONE_NUMBER"
+      increment_statistic(:skipped_invalid_phone)
+    elsif error_message.include?('template') || error_message.include?('Template') || error_message.include?('TEMPLATE')
+      Rails.logger.error "Error Category: TEMPLATE_ERROR"
+      increment_statistic(:skipped_no_template)
+    elsif error_message.include?('rate limit') || error_message.include?('Rate limit') || error_message.include?('429')
+      Rails.logger.error "Error Category: RATE_LIMIT"
+      increment_statistic(:failed)
+      # Could add :skipped_rate_limit statistic later
+    elsif error_message.include?('access token') || error_message.include?('unauthorized') || error_message.include?('401')
+      Rails.logger.error "Error Category: AUTHENTICATION_ERROR"
+      Rails.logger.error "⚠️  WARNING: Check WhatsApp API credentials!"
+      increment_statistic(:failed)
+    else
+      Rails.logger.error "Error Category: GENERAL_ERROR"
+      increment_statistic(:failed)
+    end
+    
+    Rails.logger.error "Backtrace: #{e.backtrace.first(15).join('\n')}"
+    Rails.logger.error "=" * 80
+    
     # Continue processing remaining contacts instead of failing entire campaign
     nil
   end
@@ -156,7 +185,8 @@ class Whatsapp::OneoffCampaignService
       skipped_no_template: 0,
       skipped_duplicate_campaign: 0,
       skipped_race_condition: 0,
-      skipped_invalid_phone: 0
+      skipped_invalid_phone: 0,
+      error_details: [] # Store sample errors for debugging
     }
   end
 
@@ -222,8 +252,22 @@ class Whatsapp::OneoffCampaignService
     Rails.logger.info "Successfully sent WhatsApp template message to #{to} (message_id: #{message_id})"
 
   rescue StandardError => e
+    error_details = {
+      phone: to,
+      error_class: e.class.name,
+      error_message: e.message,
+      timestamp: Time.current
+    }
+    
+    # Store first 10 errors as samples
+    if @statistics[:error_details].length < 10
+      @statistics[:error_details] << error_details
+    end
+    
     Rails.logger.error "Failed to send WhatsApp template message to #{to}: #{e.class} - #{e.message}"
+    Rails.logger.error "Full error: #{error_details.inspect}"
     Rails.logger.error "Backtrace: #{e.backtrace.first(10).join('\n')}"
+    
     # Re-raise to trigger transaction rollback and skip this contact
     raise
   end
