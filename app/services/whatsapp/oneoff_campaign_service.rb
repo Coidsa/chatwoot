@@ -216,6 +216,16 @@ class Whatsapp::OneoffCampaignService
       increment_statistic(:failed)
     end
     
+    # Store sample errors for reporting (keep only first 10 to avoid bloating statistics)
+    if @statistics[:error_details].length < 10
+      @statistics[:error_details] << {
+        phone: contact.phone_number,
+        error_class: error_class,
+        error_message: error_message.length > 100 ? error_message[0..100] + '...' : error_message,
+        error_category: error_category
+      }
+    end
+    
     # Print backtrace to terminal (first 10 lines)
     puts "\nBacktrace (first 10 lines):"
     e.backtrace.first(10).each_with_index do |line, idx|
@@ -324,12 +334,36 @@ class Whatsapp::OneoffCampaignService
   def update_campaign_statistics
     # Store statistics in trigger_rules JSONB field
     stats = campaign.trigger_rules || {}
-    stats['statistics'] = @statistics.merge(
-      completed_at: Time.current,
-      updated_at: Time.current
+    
+    # Convert error_details to hash format for JSONB storage (keep only first 10)
+    error_details_hash = @statistics[:error_details].first(10).map do |error|
+      {
+        phone: error[:phone],
+        category: error[:error_category],
+        message: error[:error_message]
+      }
+    end
+    
+    # Store statistics including error details and summary
+    stats['statistics'] = @statistics.except(:error_details).merge(
+      completed_at: Time.current.iso8601,
+      updated_at: Time.current.iso8601,
+      error_summary: summarize_errors,
+      error_samples: error_details_hash
     )
+    
     campaign.update_column(:trigger_rules, stats)
-    Rails.logger.info "Campaign #{campaign.id} statistics: #{@statistics.inspect}"
+    Rails.logger.info "Campaign #{campaign.id} statistics: #{@statistics.except(:error_details).inspect}"
+    Rails.logger.info "Error summary: #{summarize_errors.inspect}"
+  end
+  
+  def summarize_errors
+    summary = {}
+    @statistics[:error_details].each do |error|
+      category = error[:error_category] || 'UNKNOWN'
+      summary[category] = (summary[category] || 0) + 1
+    end
+    summary
   end
 
   def send_whatsapp_template_message(to:, contact: nil, conversation: nil)
