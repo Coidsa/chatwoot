@@ -48,12 +48,74 @@ class Whatsapp::IncomingMessageBaseService
   end
 
   def update_message_with_status(message, status)
+    old_status = message.status
     message.status = status[:status]
     if status[:status] == 'failed' && status[:errors].present?
       error = status[:errors]&.first
       message.external_error = "#{error[:code]}: #{error[:title]}"
     end
     message.save!
+    
+    # Update campaign statistics if this message is from a campaign
+    update_campaign_statistics_from_message_status(message, old_status, status[:status])
+  end
+
+  def update_campaign_statistics_from_message_status(message, old_status, new_status)
+    campaign_id = message.additional_attributes&.dig('campaign_id')
+    return unless campaign_id
+
+    campaign = Campaign.find_by(id: campaign_id)
+    return unless campaign
+
+    # Skip if status didn't actually change
+    return if old_status.to_s == new_status.to_s
+
+    # Update statistics based on status transition
+    # Status flow: sent -> delivered -> read (can't go backwards in normal flow)
+    stats = campaign.trigger_rules&.dig('statistics') || {}
+    old_status_s = old_status.to_s
+    new_status_s = new_status.to_s
+    
+    # Use pessimistic locking to prevent race conditions
+    campaign.with_lock do
+      stats = campaign.reload.trigger_rules&.dig('statistics') || {}
+      
+      case new_status_s
+      when 'delivered'
+        # Only increment if transitioning from sent to delivered
+        # (delivered is a subset of sent, so we count unique delivered messages)
+        if old_status_s == 'sent'
+          stats['delivered'] = (stats['delivered'] || 0) + 1
+        end
+        
+      when 'read'
+        # Only increment if transitioning from delivered/sent to read
+        # (read is a subset of delivered, so we count unique read messages)
+        if old_status_s == 'delivered' || old_status_s == 'sent'
+          stats['read'] = (stats['read'] || 0) + 1
+          # If transitioning from sent directly to read, also count as delivered
+          stats['delivered'] = (stats['delivered'] || 0) + 1 if old_status_s == 'sent'
+        end
+        
+      when 'failed'
+        # Only increment if transitioning from sent to failed
+        # (failed messages were attempted but didn't succeed)
+        if old_status_s == 'sent'
+          stats['failed'] = (stats['failed'] || 0) + 1
+          # Optionally decrement sent count, but we keep it to show attempted sends
+        end
+      end
+
+      # Update campaign statistics
+      trigger_rules = campaign.trigger_rules || {}
+      trigger_rules['statistics'] = stats
+      campaign.update_column(:trigger_rules, trigger_rules)
+      
+      Rails.logger.info "Updated campaign #{campaign.id} statistics: #{old_status_s} -> #{new_status_s} (delivered: #{stats['delivered'] || 0}, read: #{stats['read'] || 0}, failed: #{stats['failed'] || 0})"
+    end
+  rescue StandardError => e
+    Rails.logger.error "Error updating campaign statistics: #{e.message}"
+    Rails.logger.error e.backtrace.first(5).join("\n")
   end
 
   def create_messages
