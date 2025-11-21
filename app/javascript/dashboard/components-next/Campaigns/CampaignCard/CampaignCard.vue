@@ -111,6 +111,7 @@ const statisticsText = computed(() => {
     skipped_no_template = 0,
     skipped_duplicate_campaign = 0,
     skipped_race_condition = 0,
+    error_summary = {},
   } = props.statistics;
   
   // Calculate total skipped
@@ -128,8 +129,23 @@ const statisticsText = computed(() => {
   if (delivered > 0) parts.push(`${delivered} delivered`);
   if (read > 0) parts.push(`${read} read`);
   
-  // Failure metrics
-  if (failed > 0) parts.push(`${failed} failed`);
+  // Failure metrics with error summary
+  if (failed > 0) {
+    const errorDetails = [];
+    if (error_summary && Object.keys(error_summary).length > 0) {
+      Object.entries(error_summary).forEach(([category, count]) => {
+        const categoryName = category.replace(/_/g, ' ').toLowerCase();
+        errorDetails.push(`${count} ${categoryName}`);
+      });
+      if (errorDetails.length > 0) {
+        parts.push(`${failed} failed (${errorDetails.join(', ')})`);
+      } else {
+        parts.push(`${failed} failed`);
+      }
+    } else {
+      parts.push(`${failed} failed`);
+    }
+  }
   
   // Skipped metrics (show total if > 0, or break down if details available)
   if (totalSkipped > 0) {
