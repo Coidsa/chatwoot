@@ -71,8 +71,20 @@ class Whatsapp::OneoffCampaignService
 
     # Use transaction with locking to prevent duplicate sends
     ActiveRecord::Base.transaction do
-      # Find or create contact_inbox inside transaction with lock
-      contact_inbox = inbox.contact_inboxes.find_or_create_by!(contact: contact)
+      # Use ContactInboxBuilder to ensure proper source_id is set for WhatsApp
+      # ContactInboxBuilder automatically generates source_id from phone_number (removes +)
+      contact_inbox = ContactInboxBuilder.new(
+        contact: contact,
+        inbox: inbox,
+        source_id: nil # Let builder generate it from phone_number
+      ).perform
+      
+      unless contact_inbox
+        Rails.logger.error "Failed to create contact_inbox for contact #{contact.name} (#{contact.phone_number})"
+        increment_statistic(:skipped_invalid_phone)
+        return
+      end
+      
       contact_inbox.lock!
 
       # Check if conversation already exists with this campaign
@@ -102,6 +114,15 @@ class Whatsapp::OneoffCampaignService
     # Handle race condition where conversation was created by another process
     Rails.logger.info "Skipping contact #{contact.name} (#{contact.phone_number}) - conversation already exists: #{e.message}"
     increment_statistic(:skipped_race_condition)
+    nil
+  rescue ActiveRecord::RecordInvalid => e
+    # Handle validation errors (e.g., source_id validation)
+    Rails.logger.error "Validation error for contact #{contact.name} (#{contact.phone_number}): #{e.message}"
+    if e.message.include?('source') || e.message.include?('Source')
+      increment_statistic(:skipped_invalid_phone)
+    else
+      increment_statistic(:failed)
+    end
     nil
   rescue StandardError => e
     error_class = e.class.name
