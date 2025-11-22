@@ -116,6 +116,9 @@ class Whatsapp::OneoffCampaignService
     # Check if message was already sent from THIS specific campaign (by campaign_id)
     # This allows creating NEW campaigns for the same audience - they will send to all contacts
     # But prevents re-sending from the SAME campaign (duplicate prevention)
+    # 
+    # Important: We only check for messages with source_id (actually sent via WhatsApp API)
+    # Messages without source_id were not successfully sent and should be retried
     existing_message = Message.joins(:conversation)
                               .where(
                                 conversations: {
@@ -127,28 +130,51 @@ class Whatsapp::OneoffCampaignService
                               )
                               .where.not(source_id: nil)
                               .where("messages.additional_attributes -> 'campaign_id' = ?", campaign.id.to_s)
-                              .exists?
+                              .first
     
     if existing_message
-      Rails.logger.info "Skipping contact #{contact.name} (#{contact.phone_number}) - already received message from campaign #{campaign.id}"
+      Rails.logger.info "=" * 80
+      Rails.logger.info "⏭️  DUPLICATE DETECTED for contact #{contact.name} (#{contact.phone_number})"
+      Rails.logger.info "   Campaign ID: #{campaign.id}"
+      Rails.logger.info "   Existing message ID: #{existing_message.id}"
+      Rails.logger.info "   Message source_id: #{existing_message.source_id}"
+      Rails.logger.info "   Message status: #{existing_message.status}"
+      Rails.logger.info "   Conversation ID: #{existing_message.conversation_id}"
+      Rails.logger.info "   Message created_at: #{existing_message.created_at}"
+      Rails.logger.info "=" * 80
+      
       increment_statistic(:skipped_duplicate_campaign)
       return
     end
     
-    # Check if conversation exists from this campaign (might exist without message if sending failed)
-    # If conversation exists but no message was sent, delete it and retry
-    existing_conversation = Conversation.find_by(
+    # Also check for conversations from this campaign that might not have messages yet
+    # (e.g., from failed attempts where conversation was created but message sending failed)
+    existing_conversation_with_campaign = Conversation.find_by(
       account: campaign.account,
       inbox: inbox,
       contact: contact,
       campaign_id: campaign.id
     )
-
-    if existing_conversation
-      # Conversation exists but no message was sent - delete it and retry
-      Rails.logger.warn "Found existing conversation #{existing_conversation.id} for campaign #{campaign.id} but no message sent - deleting and retrying"
-      existing_conversation.destroy
+    
+    if existing_conversation_with_campaign
+      # Check if conversation has any successful messages (with source_id)
+      has_successful_message = existing_conversation_with_campaign.messages
+                                                                   .where.not(source_id: nil)
+                                                                   .where("messages.additional_attributes -> 'campaign_id' = ?", campaign.id.to_s)
+                                                                   .exists?
+      
+      if has_successful_message
+        Rails.logger.info "⏭️  DUPLICATE: Conversation #{existing_conversation_with_campaign.id} exists with successful message from campaign #{campaign.id}"
+        increment_statistic(:skipped_duplicate_campaign)
+        return
+      else
+        # Conversation exists but no successful message - delete it and retry
+        Rails.logger.warn "⚠️  Found conversation #{existing_conversation_with_campaign.id} for campaign #{campaign.id} but no successful message - deleting and retrying"
+        existing_conversation_with_campaign.destroy
+      end
     end
+    
+    # Note: Conversation check is now handled above in the duplicate check section
 
     # Create conversation - use create! to get error if already exists (race condition protection)
     conversation = Conversation.create!(
@@ -386,6 +412,10 @@ class Whatsapp::OneoffCampaignService
     # Store statistics in trigger_rules JSONB field
     stats = campaign.trigger_rules || {}
     
+    # Calculate actual statistics from database as verification
+    # This helps catch discrepancies between what we think we sent and what's actually in the DB
+    db_stats = calculate_statistics_from_database
+    
     # Convert error_details to hash format for JSONB storage (keep only first 10)
     error_details_hash = @statistics[:error_details].first(10).map do |error|
       {
@@ -396,16 +426,49 @@ class Whatsapp::OneoffCampaignService
     end
     
     # Store statistics including error details and summary
-    stats['statistics'] = @statistics.except(:error_details).merge(
+    # Use database stats for sent/delivered/read as source of truth
+    final_stats = @statistics.except(:error_details).merge(
       completed_at: Time.current.iso8601,
       updated_at: Time.current.iso8601,
       error_summary: summarize_errors,
-      error_samples: error_details_hash
+      error_samples: error_details_hash,
+      # Include database-calculated stats for verification
+      db_calculated: db_stats
     )
     
+    # Update sent/delivered/read from database if different (webhooks might have updated them)
+    if db_stats[:sent] > final_stats[:sent] || db_stats[:delivered] > final_stats[:delivered] || db_stats[:read] > final_stats[:read]
+      Rails.logger.warn "Campaign #{campaign.id}: Database stats differ from runtime stats"
+      Rails.logger.warn "  Runtime: sent=#{final_stats[:sent]}, delivered=#{final_stats[:delivered]}, read=#{final_stats[:read]}"
+      Rails.logger.warn "  Database: sent=#{db_stats[:sent]}, delivered=#{db_stats[:delivered]}, read=#{db_stats[:read]}"
+      Rails.logger.warn "  Using database stats as source of truth"
+      
+      # Use database stats as source of truth (webhooks might have updated them)
+      final_stats[:sent] = db_stats[:sent]
+      final_stats[:delivered] = db_stats[:delivered]
+      final_stats[:read] = db_stats[:read]
+    end
+    
+    stats['statistics'] = final_stats
     campaign.update_column(:trigger_rules, stats)
-    Rails.logger.info "Campaign #{campaign.id} statistics: #{@statistics.except(:error_details).inspect}"
+    Rails.logger.info "Campaign #{campaign.id} statistics: #{final_stats.except(:error_details, :db_calculated).inspect}"
     Rails.logger.info "Error summary: #{summarize_errors.inspect}"
+  end
+  
+  def calculate_statistics_from_database
+    # Calculate statistics from actual messages in database
+    # This is the source of truth - what's actually in the DB
+    messages = Message.joins(:conversation)
+                      .where(conversations: { campaign_id: campaign.id })
+                      .where("messages.additional_attributes -> 'campaign_id' = ?", campaign.id.to_s)
+                      .where(message_type: :outgoing)
+    
+    {
+      sent: messages.where.not(source_id: nil).count,
+      delivered: messages.where(status: [:delivered, :read]).where.not(source_id: nil).count,
+      read: messages.where(status: :read).where.not(source_id: nil).count,
+      failed: messages.where(status: :failed).where.not(source_id: nil).count
+    }
   end
   
   def summarize_errors
